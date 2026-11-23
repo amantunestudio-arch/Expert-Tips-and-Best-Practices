@@ -406,6 +406,7 @@ function Editor({ value, onChange, toast }) {
 function GitBox({ articles, setArticles, toast, exportJson }) {
   const c0 = ghc();
   const [tok, setTok] = useState(getTok()), [o, setO] = useState(c0.owner), [rp, setRp] = useState(c0.repo), [br, setBr] = useState(c0.branch), [on, setOn] = useState(!!getTok());
+  useEffect(() => { try { localStorage.setItem(GHT, tok.trim()); localStorage.setItem(GHC, JSON.stringify({ owner: o.trim(), repo: rp.trim(), branch: br.trim() })); } catch {} setOn(!!tok.trim()); }, [tok, o, rp, br]);
   const put = () => { try { localStorage.setItem(GHT, tok.trim()); localStorage.setItem(GHC, JSON.stringify({ owner: o.trim(), repo: rp.trim(), branch: br.trim() })); } catch {} setOn(!!tok.trim()); toast(tok.trim() ? "Live sync is ON" : "Live sync is OFF"); };
   const test = async () => {
     put();
@@ -435,11 +436,12 @@ function Admin({ articles, setArticles }) {
   const [authed, setAuthed] = useState(() => lsGet(TOK) === ADMIN.token);
   const [busy, setBusy] = useState(false);
   const [f, setF] = useState({ u: "", p: "" }), [err, setErr] = useState("");
-  const [cur, setCur] = useState(null), [tm, setTm] = useState("");
+  const [cur, setCur] = useState(null), [tm, setTm] = useState(""), [saving, setSaving] = useState(false);
   const up = (k, v) => setCur((c) => ({ ...c, [k]: v }));
   const imgFile = useRef();
   useMeta("Admin · " + BRAND, "", "");
-  const toast = (m) => { setTm(m); setTimeout(() => setTm(""), 4500); };
+  const tt = useRef();
+  const toast = (m, ms = 5500) => { clearTimeout(tt.current); setTm(m); tt.current = setTimeout(() => setTm(""), ms); };
   const T = tm && <div className="toast" role="status">{tm}</div>;
 
   if (!authed) return (<Shell><div className="adm" style={{ maxWidth: 440 }}><div className="box login" style={{ padding: 32 }}>
@@ -460,12 +462,20 @@ function Admin({ articles, setArticles }) {
     catch (e) { toast(e.status === 401 || e.status === 403 ? "GitHub refused the token: " + e.message : "Publish failed: " + e.message); return false; }
   };
   const saveCur = async () => {
+    if (saving) return;
     if (!cur.title.trim()) return toast("Add a title first");
     let slug = cur.slug || slugify(cur.title);
     if (RESERVED.includes(slug) || articles.some((x) => x.slug === slug && x.id !== cur.id)) slug += "-" + Date.now().toString(36).slice(-4);
     const a = { ...cur, slug, faqs: cur.faqs.filter((q) => q.q.trim() && q.a.trim()) };
     const i = articles.findIndex((x) => x.id === a.id);
-    if (await commit(i < 0 ? [a, ...articles] : articles.map((x) => (x.id === a.id ? a : x)))) { try { await publishPage(a); } catch (e) { toast("Saved, but the page file failed: " + e.message); } setCur(null); toast("Saved. It is going live now."); scrollTo(0, 0); }
+    setSaving(true);
+    const ok = await commit(i < 0 ? [a, ...articles] : articles.map((x) => (x.id === a.id ? a : x)));
+    setSaving(false);
+    if (!ok) return;
+    setCur(null); scrollTo(0, 0);
+    toast("✓ Saved on GitHub. Home and Guides update within about a minute.");
+    try { await publishPage(a); toast("✓ Published. Page file /" + a.slug + "/ is on GitHub too. Its direct link works after the next deploy."); }
+    catch (e) { toast("Saved, but the page file failed: " + e.message); }
   };
   const exportJson = () => {
     const u = URL.createObjectURL(new Blob([JSON.stringify(articles, null, 1)], { type: "application/json" }));
@@ -474,7 +484,7 @@ function Admin({ articles, setArticles }) {
 
   if (cur) { const isNew = !articles.some((x) => x.id === cur.id); return (<Shell><div className="adm">
     <div className="row sp" style={{ marginBottom: 16 }}><h1 style={{ fontSize: 30 }}>{isNew ? "New article" : "Edit article"}</h1>
-      <div className="row"><button className="btn ghost" onClick={() => setCur(null)}>Cancel</button><button className="btn cor" onClick={saveCur}>Save article</button></div></div>
+      <div className="row"><button className="btn ghost" onClick={() => setCur(null)}>Cancel</button><button className="btn cor" disabled={saving} onClick={saveCur}>{saving ? "Saving…" : "Save article"}</button></div></div>
     <div className="box"><label><span className="step">1</span>Title</label><input type="text" value={cur.title} onChange={(e) => up("title", e.target.value)} placeholder={SITE.titleHint} /></div>
     <div className="box"><label><span className="step">2</span>Feature image</label>
       <div className="row"><input type="url" style={{ flex: 1, minWidth: 200 }} placeholder="Paste image URL, or upload from your device" value={cur.image.startsWith("data:") ? "" : cur.image} onChange={(e) => up("image", e.target.value)} />
@@ -492,7 +502,7 @@ function Admin({ articles, setArticles }) {
       <button className="btn ghost" onClick={() => up("faqs", [...cur.faqs, { q: "", a: "" }])}>+ Add FAQ</button></div>
     <div className="box"><label><span className="step">5</span>Note (shown in a highlighted box)</label><textarea value={cur.note} onChange={(e) => up("note", e.target.value)} placeholder="One important thing the reader should not miss" /></div>
     <div className="box"><label className="switch"><input type="checkbox" checked={cur.showRelated} onChange={(e) => up("showRelated", e.target.checked)} /><i /><span><b>Related articles</b> are {cur.showRelated ? "ON" : "OFF"}</span></label></div>
-    <div className="row" style={{ justifyContent: "flex-end" }}><button className="btn ghost" onClick={() => setCur(null)}>Cancel</button><button className="btn cor" onClick={saveCur}>Save article</button></div>
+    <div className="row" style={{ justifyContent: "flex-end" }}><button className="btn ghost" onClick={() => setCur(null)}>Cancel</button><button className="btn cor" disabled={saving} onClick={saveCur}>{saving ? "Saving…" : "Save article"}</button></div>
     {T}
   </div></Shell>); }
 
