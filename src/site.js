@@ -12,6 +12,7 @@ export const SITE = {
   cardNoun: "tips inside",
   tocNoun: "tips",
   toc: "The tips at a glance",
+  url: "", // your live address without a slash at the end, e.g. "https://expert-tips-and-best-practices.deploysnap.site" (used for canonical links)
   email: "hello@example.com", // change to your real email
   admin: { user: "admin", pass: "Tips-Change-2026", token: "tips-static-token-8a42c7e1d5" },
   title: "Expert Tips & Best Practices: practical advice with examples",

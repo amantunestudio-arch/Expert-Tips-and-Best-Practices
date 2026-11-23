@@ -4,50 +4,62 @@ import bundled from "./articles.json";
 const seed = (() => { try { const e = document.getElementById("cs-data"); const j = e && JSON.parse(e.textContent); return Array.isArray(j) ? j : bundled; } catch { return bundled; } })();
 
 import { SITE } from "./site.js";
+import { articlePage, renderPage } from "./pagegen.js";
 /* All site names, colours' texts, passwords and wording live in src/site.js. Change ADMIN login there before you deploy. */
 const ADMIN = SITE.admin, BRAND = SITE.name, CONTACT_EMAIL = SITE.email;
 const KEY = SITE.id + "_articles_v1", TOK = SITE.id + "_token", THEME = SITE.id + "_theme";
-const LV_URL = SITE.id + "_lv_url", LV_METHOD = SITE.id + "_lv_method", LV_HDR = SITE.id + "_lv_hdr";
-const RESERVED = ["guides", "blogs", "about", "contact", "admin"];
+const RESERVED = ["guides", "blogs", "about", "contact", "admin", "img", "assets", "content", "dist", "src", "public", "favicon-svg"];
 
-/* ====== AUTO-PUBLISH (optional) ======
-   Leave empty = articles are saved in this browser, export articles.json to publish.
-   Paste your own Lambda Function URL (see AUTO-PUBLISH-SETUP.md) to publish live from the dashboard. */
-const API_URL = "";
-const LIVE = !!API_URL;
-const getTok = () => { try { return localStorage.getItem(TOK) || ""; } catch { return ""; } };
-const api = async (body) => {
-  const r = await fetch(API_URL, { method: "POST", headers: { "content-type": "text/plain", "x-admin-token": getTok() }, body: JSON.stringify(body) });
+/* ====== LIVE SYNC WITH GITHUB ======
+   Articles live in the GitHub repo (content/articles.json, images in content/img/).
+   The public site reads them from GitHub, the admin dashboard writes them there with a GitHub token.
+   So every change you save in /#/admin is live for everybody without rebuilding or redeploying. */
+const GH_DEFAULT = { owner: "amantunestudio-arch", repo: "Expert-Tips-and-Best-Practices", branch: "main" };
+const GHT = SITE.id + "_ghtoken", GHC = SITE.id + "_ghconf";
+const ARTICLES_PATH = "content/articles.json", IMG_DIR = "content/img";
+const lsGet = (k) => { try { return localStorage.getItem(k) || ""; } catch { return ""; } };
+const getTok = () => lsGet(GHT);
+const ghc = () => { try { return { ...GH_DEFAULT, ...JSON.parse(lsGet(GHC) || "{}") }; } catch { return GH_DEFAULT; } };
+const rawUrl = (path) => { const c = ghc(); return "https://raw.githubusercontent.com/" + c.owner + "/" + c.repo + "/" + c.branch + "/" + path; };
+const b64 = (str) => btoa(unescape(encodeURIComponent(str)));
+const ghApi = async (method, path, body) => {
+  const c = ghc();
+  const r = await fetch("https://api.github.com/repos/" + c.owner + "/" + c.repo + "/contents/" + path + (method === "GET" ? "?ref=" + c.branch : ""), {
+    method, cache: "no-store",
+    headers: { Accept: "application/vnd.github+json", Authorization: "Bearer " + getTok(), ...(body ? { "Content-Type": "application/json" } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
   const j = await r.json().catch(() => ({}));
-  if (!r.ok) { const e = new Error(j.error || "Server error " + r.status); e.status = r.status; throw e; }
+  if (!r.ok) { const e = new Error(j.message || "GitHub error " + r.status); e.status = r.status; throw e; }
   return j;
 };
-
-/* ====== live update on deed.page: the site rebuilds its own index.html with the new articles and uploads it ====== */
-const lget = (k) => { try { return localStorage.getItem(k) || ""; } catch { return ""; } };
-const deedOn = () => !LIVE && /^https?:\/\//.test(lget(LV_URL));
-const LT = String.fromCharCode(60); // "<" built at run time so these markers never appear inside the page's own code
-const mk = (n, end) => LT + "!--" + (end ? "/" : "") + n + "-->";
-const grab = (t, n) => { const a = t.indexOf(mk(n)), b = t.indexOf(mk(n, 1)); return a < 0 || b < 0 ? null : t.slice(a + mk(n).length, b); };
-async function buildSite(list) {
-  const r = await fetch(location.href.split("#")[0], { cache: "no-store", headers: { Accept: "text/html" } });
-  const t = await r.text(), head = grab(t, "CSH"), body = grab(t, "CSB");
-  if (head === null || body === null) throw new Error("open the published site, not the dev server");
-  const data = JSON.stringify(list).replace(/</g, "\\u003c"), open = LT + 'script id="cs-data" type="application/json">', i = body.indexOf(open), j = body.indexOf(LT + "/script>", i);
-  if (i < 0 || j < 0) throw new Error("site file has no data block");
-  const nb = body.slice(0, i + open.length) + data + body.slice(j);
-  return LT + "!doctype html>" + LT + 'html lang="en">' + LT + "head>" + mk("CSH") + head + mk("CSH", 1) + LT + "/head>" + LT + "body>" + LT + 'div id="root">' + LT + "/div>" + mk("CSB") + nb + mk("CSB", 1) + LT + "/body>" + LT + "/html>";
-}
-async function deedPublish(list) {
-  const html = await buildSite(list), headers = { "Content-Type": "text/html" };
-  lget(LV_HDR).split("\n").forEach((l) => { const k = l.indexOf(":"); if (k > 0) headers[l.slice(0, k).trim()] = l.slice(k + 1).trim(); });
-  const r = await fetch(lget(LV_URL), { method: lget(LV_METHOD) || "PUT", headers, body: html });
-  if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || j.message || "the host said " + r.status); }
-}
-async function downloadSite(list) {
-  const u = URL.createObjectURL(new Blob([await buildSite(list)], { type: "text/html" }));
-  Object.assign(document.createElement("a"), { href: u, download: "index.html" }).click(); URL.revokeObjectURL(u);
-}
+const ghWrite = async (path, content64, message) => {
+  let sha; try { sha = (await ghApi("GET", path)).sha; } catch (e) { if (e.status !== 404) throw e; }
+  return ghApi("PUT", path, { message, content: content64, branch: ghc().branch, ...(sha ? { sha } : {}) });
+};
+const fetchRemote = async () => {
+  const c = ghc(); let r;
+  if (getTok()) { try { r = await fetch("https://api.github.com/repos/" + c.owner + "/" + c.repo + "/contents/" + ARTICLES_PATH + "?ref=" + c.branch, { cache: "no-store", headers: { Accept: "application/vnd.github.raw+json", Authorization: "Bearer " + getTok() } }); } catch { r = null; } }
+  if (!r || !r.ok) r = await fetch(rawUrl(ARTICLES_PATH) + "?t=" + Math.floor(Date.now() / 60000), { cache: "no-store" });
+  if (!r.ok) throw new Error("no remote articles");
+  const j = await r.json(); if (!Array.isArray(j)) throw new Error("bad articles file"); return j;
+};
+const ghUpload = async (dataUrl) => {
+  if (!getTok()) throw new Error("add your GitHub token in the dashboard first");
+  const m = /^data:image\/(\w+);base64,(.*)$/.exec(dataUrl); if (!m) throw new Error("unsupported image");
+  const path = IMG_DIR + "/" + Date.now().toString(36) + "." + (m[1] === "jpeg" ? "jpg" : m[1]);
+  await ghWrite(path, m[2], "Add image from admin");
+  return rawUrl(path);
+};
+const ghDelete = async (path, message) => {
+  let sha; try { sha = (await ghApi("GET", path)).sha; } catch (e) { if (e.status === 404) return; throw e; }
+  return ghApi("DELETE", path, { message, sha, branch: ghc().branch });
+};
+/* every article also gets its own real page file: dist/<slug>/index.html (goes online with the next deploy) */
+const publishPage = async (a) => {
+  const tpl = await (await fetch("/", { cache: "no-store" })).text();
+  await ghWrite("dist/" + a.slug + "/index.html", b64(renderPage(tpl, articlePage(a))), "Page /" + a.slug);
+};
 
 const load = () => { try { const s = JSON.parse(localStorage.getItem(KEY)); return Array.isArray(s) ? s : seed; } catch { return seed; } };
 const save = (a) => { try { localStorage.setItem(KEY, JSON.stringify(a)); return true; } catch { alert("Browser storage is full. Use smaller images, or paste an image URL instead."); return false; } };
@@ -87,12 +99,13 @@ const toImg = (file, max = 1000) => new Promise((res) => {
   r.onload = () => { const i = new Image(); i.onload = () => { const k = Math.min(1, max / i.width), c = document.createElement("canvas"); c.width = i.width * k; c.height = i.height * k; c.getContext("2d").drawImage(i, 0, 0, c.width, c.height); res(c.toDataURL("image/jpeg", 0.78)); }; i.src = r.result; };
   r.readAsDataURL(file);
 });
-const pic = async (file, max) => { const d = await toImg(file, max); if (!LIVE) return d; const j = await api({ action: "upload", data: d }); return "./" + j.url; };
+const pic = async (file, max) => ghUpload(await toImg(file, max));
 
-/* ====== hash router ====== */
-const go = (to) => { location.hash = "#" + to; scrollTo(0, 0); };
+/* ====== router: real URLs (/about/, /guides/, /my-article/); every page also exists as its own HTML file ====== */
+const nav = (to) => { const u = to === "/" ? "/" : to + "/"; if (location.pathname !== u) history.pushState({}, "", u); dispatchEvent(new PopStateEvent("popstate")); };
+const go = (to) => nav(to);
 const Link = ({ to, children, onClick, ...r }) => (
-  <a href={"#" + to} {...r} onClick={(e) => { onClick && onClick(e); if (e.defaultPrevented || e.button || e.metaKey || e.ctrlKey || e.shiftKey) return; e.preventDefault(); if (location.hash !== "#" + to) location.hash = "#" + to; else scrollTo(0, 0); }}>{children}</a>
+  <a href={to === "/" ? "/" : to + "/"} {...r} onClick={(e) => { onClick && onClick(e); if (e.defaultPrevented || e.button || e.metaKey || e.ctrlKey || e.shiftKey) return; e.preventDefault(); if (location.pathname.replace(/\/+$/, "") !== (to === "/" ? "" : to)) nav(to); else scrollTo(0, 0); }}>{children}</a>
 );
 function useMeta(title, desc, ld) {
   useEffect(() => {
@@ -331,7 +344,7 @@ function Article({ a, all }) {
     <h1>{a.title}</h1>
     <div className="meta">{new Date(a.date).toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" })} · {mins(a)} min read{toc.length ? ` · ${toc.length} ${SITE.tocNoun}` : ""}</div>
     {a.image && <div className="featwrap"><img className="feat" src={a.image} alt={a.title} /></div>}
-    {toc.length >= 3 && <div className="toc rv" role="navigation" aria-label="At a glance"><b>{SITE.toc}</b><ol>{toc.map(([id, t, n]) => <li key={id} className={act === id ? "on" : ""}><a href={"#/" + a.slug} onClick={(e) => { e.preventDefault(); document.getElementById(id)?.scrollIntoView({ behavior: "smooth" }); }}><i>{n}</i>{t}</a></li>)}</ol></div>}
+    {toc.length >= 3 && <div className="toc rv" role="navigation" aria-label="At a glance"><b>{SITE.toc}</b><ol>{toc.map(([id, t, n]) => <li key={id} className={act === id ? "on" : ""}><a href={"#" + id} onClick={(e) => { e.preventDefault(); document.getElementById(id)?.scrollIntoView({ behavior: "smooth" }); }}><i>{n}</i>{t}</a></li>)}</ol></div>}
     <div className="prose" ref={body} />
     {a.note && <div className="note rv"><div><b>Note: </b>{a.note}</div></div>}
     {a.faqs.length > 0 && <Faq items={a.faqs} />}
@@ -390,34 +403,43 @@ function Editor({ value, onChange, toast }) {
 }
 
 /* ====== live-update settings ====== */
-function DeedBox({ articles, toast, exportJson, onReset }) {
-  const [url, setUrl] = useState(lget(LV_URL)), [me, setMe] = useState(lget(LV_METHOD) || "PUT"), [hd, setHd] = useState(lget(LV_HDR)), [on, setOn] = useState(deedOn());
-  const put = () => { try { localStorage.setItem(LV_URL, url.trim()); localStorage.setItem(LV_METHOD, me); localStorage.setItem(LV_HDR, hd); } catch {} setOn(deedOn()); toast(deedOn() ? "Live update is ON" : "Live update is OFF"); };
+function GitBox({ articles, setArticles, toast, exportJson }) {
+  const c0 = ghc();
+  const [tok, setTok] = useState(getTok()), [o, setO] = useState(c0.owner), [rp, setRp] = useState(c0.repo), [br, setBr] = useState(c0.branch), [on, setOn] = useState(!!getTok());
+  const put = () => { try { localStorage.setItem(GHT, tok.trim()); localStorage.setItem(GHC, JSON.stringify({ owner: o.trim(), repo: rp.trim(), branch: br.trim() })); } catch {} setOn(!!tok.trim()); toast(tok.trim() ? "Live sync is ON" : "Live sync is OFF"); };
+  const test = async () => {
+    put();
+    try {
+      const r = await fetch("https://api.github.com/repos/" + o.trim() + "/" + rp.trim(), { cache: "no-store", headers: { Accept: "application/vnd.github+json", Authorization: "Bearer " + tok.trim() } });
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) return toast("GitHub says: " + (j.message || r.status));
+      toast(j.permissions && j.permissions.push ? "Connected. You can publish." : "Token has no write access to this repo");
+    } catch (e) { toast("Cannot reach GitHub: " + e.message); }
+  };
+  const reload = async () => { try { setArticles(await fetchRemote()); toast("Loaded the latest from GitHub"); } catch (e) { toast("Nothing on GitHub yet, showing the built-in articles"); } };
+  const inp = { padding: "12px 14px", borderRadius: 12, border: "2px solid var(--ln)", background: "var(--bg)", color: "var(--ink)", font: "inherit" };
   return (<div className="box">
-    <label>Live site updates {on ? <span className="okp">ON</span> : <span className="offp">OFF</span>}</label>
-    <p className="hint" style={{ marginTop: 0 }}>Optional. Paste the update address and key your hosting gave you. After that, every Save, edit or delete sends the new site file to your host. The key stays in this browser only. Leave empty to publish by hand with “Download site file”.</p>
-    <div className="row"><input type="text" style={{ flex: 1, minWidth: 240 }} placeholder="Update address, e.g. https://deed.page/v1/sites?slug=your-site" value={url} onChange={(e) => setUrl(e.target.value)} />
-      <select value={me} onChange={(e) => setMe(e.target.value)} style={{ padding: "12px 14px", borderRadius: 12, border: "2px solid var(--ln)", background: "var(--bg)", color: "var(--ink)", font: "inherit" }}><option>PUT</option><option>POST</option></select></div>
-    <textarea style={{ marginTop: 10, minHeight: 64 }} placeholder={"Headers, one per line, e.g.\nAuthorization: Bearer your-key"} value={hd} onChange={(e) => setHd(e.target.value)} />
-    <div className="row" style={{ marginTop: 10 }}><button className="btn" onClick={put}>Save settings</button>
-      <button className="btn ghost sm" onClick={() => { setUrl("https://deed.page/v1/sites?slug="); setMe("PUT"); setHd("Authorization: Bearer "); }}>Fill for deed.page</button></div>
-    <div className="row" style={{ marginTop: 14 }}>
-      <button className="btn ghost" onClick={async () => { try { await downloadSite(articles); toast("Site file downloaded"); } catch (e) { toast(e.message); } }}>Download site file (index.html)</button>
-      <button className="btn ghost" onClick={exportJson}>Export articles.json</button>
-      <button className="btn ghost" onClick={() => { if (confirm("Discard browser changes and show the published articles?")) onReset(); }}>Reset to published</button></div>
-    <p className="hint">If a live update fails, download the site file and upload it on your host by hand.</p></div>);
+    <label>Live sync with GitHub {on ? <span className="okp">ON</span> : <span className="offp">OFF</span>}</label>
+    <p className="hint" style={{ marginTop: 0 }}>Every Save, edit or delete is written to your GitHub repo and appears on the live site within about a minute. No rebuild or redeploy needed. The token stays in this browser only.</p>
+    <div className="row"><input type="text" style={{ ...inp, flex: 1, minWidth: 160 }} placeholder="GitHub owner" value={o} onChange={(e) => setO(e.target.value)} />
+      <input type="text" style={{ ...inp, flex: 2, minWidth: 220 }} placeholder="Repository name" value={rp} onChange={(e) => setRp(e.target.value)} />
+      <input type="text" style={{ ...inp, width: 110 }} placeholder="Branch" value={br} onChange={(e) => setBr(e.target.value)} /></div>
+    <input type="password" autoComplete="off" style={{ ...inp, width: "100%", marginTop: 10 }} placeholder="GitHub token (fine-grained, Contents: read and write)" value={tok} onChange={(e) => setTok(e.target.value)} />
+    <div className="row" style={{ marginTop: 10 }}><button className="btn" onClick={put}>Save settings</button><button className="btn ghost" onClick={test}>Test connection</button><button className="btn ghost" onClick={reload}>Load latest from GitHub</button></div>
+    <div className="row" style={{ marginTop: 14 }}><button className="btn ghost" onClick={exportJson}>Download backup (articles.json)</button></div>
+    <p className="hint">Tip: the token is the real key. Anyone without it cannot change your site, even if they guess the admin password.</p></div>);
 }
 
 /* ====== admin dashboard ====== */
 function Admin({ articles, setArticles }) {
-  const [authed, setAuthed] = useState(() => (LIVE ? !!getTok() : getTok() === ADMIN.token));
+  const [authed, setAuthed] = useState(() => lsGet(TOK) === ADMIN.token);
   const [busy, setBusy] = useState(false);
   const [f, setF] = useState({ u: "", p: "" }), [err, setErr] = useState("");
   const [cur, setCur] = useState(null), [tm, setTm] = useState("");
   const up = (k, v) => setCur((c) => ({ ...c, [k]: v }));
   const imgFile = useRef();
   useMeta("Admin · " + BRAND, "", "");
-  const toast = (m) => { setTm(m); setTimeout(() => setTm(""), 2400); };
+  const toast = (m) => { setTm(m); setTimeout(() => setTm(""), 4500); };
   const T = tm && <div className="toast" role="status">{tm}</div>;
 
   if (!authed) return (<Shell><div className="adm" style={{ maxWidth: 440 }}><div className="box login" style={{ padding: 32 }}>
@@ -429,24 +451,13 @@ function Admin({ articles, setArticles }) {
       onKeyDown={(e) => e.key === "Enter" && document.getElementById("login").click()} />
     {err && <p className="err">{err}</p>}
     <button id="login" className="btn" style={{ marginTop: 18, width: "100%", justifyContent: "center" }} onClick={async () => {
-      if (LIVE) {
-        try { setBusy(true); const j = await api({ action: "login", user: f.u, pass: f.p }); try { localStorage.setItem(TOK, j.token); } catch {} setErr(""); setAuthed(true); }
-        catch (e) { setErr(e.status === 401 ? "Wrong username or password." : "Cannot reach the server: " + e.message); } finally { setBusy(false); }
-      } else if (f.u === ADMIN.user && f.p === ADMIN.pass) { try { localStorage.setItem(TOK, ADMIN.token); } catch {} setAuthed(true); } else setErr("Wrong username or password.");
+      if (f.u === ADMIN.user && f.p === ADMIN.pass) { try { localStorage.setItem(TOK, ADMIN.token); } catch {} setErr(""); setAuthed(true); } else setErr("Wrong username or password.");
     }}>{busy ? "Please wait…" : "Log in"}</button></div></div></Shell>);
 
   const commit = async (list) => {
-    if (!LIVE) {
-      if (!save(list)) return false;
-      setArticles(list);
-      if (deedOn()) {
-        try { toast("Updating your live site…"); await deedPublish(list); toast("Live site updated. Refresh the site in a minute to see it."); }
-        catch (e) { toast("Live update failed: " + e.message + ". Use “Download site file” below and upload it."); }
-      }
-      return true;
-    }
-    try { toast("Publishing…"); await api({ action: "publish", articles: list }); setArticles(list); return true; }
-    catch (e) { if (e.status === 401) { try { localStorage.removeItem(TOK); } catch {} setAuthed(false); } else toast("Publish failed: " + e.message); return false; }
+    if (!getTok()) { toast("First add your GitHub token in “Live sync” on the dashboard"); return false; }
+    try { toast("Publishing to GitHub…"); await ghWrite(ARTICLES_PATH, b64(JSON.stringify(list, null, 1)), "Update articles from admin"); save(list); setArticles(list); return true; }
+    catch (e) { toast(e.status === 401 || e.status === 403 ? "GitHub refused the token: " + e.message : "Publish failed: " + e.message); return false; }
   };
   const saveCur = async () => {
     if (!cur.title.trim()) return toast("Add a title first");
@@ -454,7 +465,7 @@ function Admin({ articles, setArticles }) {
     if (RESERVED.includes(slug) || articles.some((x) => x.slug === slug && x.id !== cur.id)) slug += "-" + Date.now().toString(36).slice(-4);
     const a = { ...cur, slug, faqs: cur.faqs.filter((q) => q.q.trim() && q.a.trim()) };
     const i = articles.findIndex((x) => x.id === a.id);
-    if (await commit(i < 0 ? [a, ...articles] : articles.map((x) => (x.id === a.id ? a : x)))) { setCur(null); if (LIVE) toast("Published. It is live now."); else if (!deedOn()) toast("Article saved"); scrollTo(0, 0); }
+    if (await commit(i < 0 ? [a, ...articles] : articles.map((x) => (x.id === a.id ? a : x)))) { try { await publishPage(a); } catch (e) { toast("Saved, but the page file failed: " + e.message); } setCur(null); toast("Saved. It is going live now."); scrollTo(0, 0); }
   };
   const exportJson = () => {
     const u = URL.createObjectURL(new Blob([JSON.stringify(articles, null, 1)], { type: "application/json" }));
@@ -490,29 +501,25 @@ function Admin({ articles, setArticles }) {
       <div className="row"><button className="btn cor" onClick={() => setCur(blank())}>+ New article</button>
         <button className="btn ghost" onClick={() => { try { localStorage.removeItem(TOK); } catch {} setAuthed(false); }}>Log out</button></div></div>
     <div className="stat3"><div><b>{articles.length}</b><span>Articles</span></div><div><b>{articles.filter((a) => a.showRelated).length}</b><span>With related ON</span></div><div><b>{articles.reduce((n, a) => n + a.faqs.length, 0)}</b><span>FAQs in total</span></div></div>
-    {LIVE ? <div className="box"><p style={{ marginTop: 0 }}>Auto-publish is <b>ON</b>. Every save, edit or delete goes live on the site straight away. You can still download a backup copy.</p>
-      <div className="row"><button className="btn" onClick={exportJson}>Download backup (articles.json)</button></div></div>
-      : <DeedBox articles={articles} toast={toast} exportJson={exportJson} onReset={() => { try { localStorage.removeItem(KEY); } catch {} setArticles(seed); toast("Reset done"); }} />}
+    <GitBox articles={articles} setArticles={setArticles} toast={toast} exportJson={exportJson} />
     <div className="box">{articles.length === 0 && <p>No articles yet. Click “New article”.</p>}
       {articles.map((a) => (<div className="item" key={a.id}>
         {a.image ? <img className="th" src={a.image} alt="" /> : <div className="th" />}
         <div className="tx"><b>{a.title}</b><div className="hint" style={{ margin: 0 }}>/{a.slug} · {a.date} · {a.faqs.length} FAQs · related {a.showRelated ? "on" : "off"}</div></div>
         <div className="row"><button className="btn ghost sm" onClick={() => go("/" + a.slug)}>View</button>
           <button className="btn sm" onClick={() => setCur(JSON.parse(JSON.stringify(a)))}>Edit</button>
-          <button className="btn red sm" onClick={async () => { if (confirm("Delete this article?") && (await commit(articles.filter((x) => x.id !== a.id)))) { if (LIVE) toast("Deleted and live"); else if (!deedOn()) toast("Deleted"); } }}>Delete</button></div></div>))}</div>
+          <button className="btn red sm" onClick={async () => { if (confirm("Delete this article?") && (await commit(articles.filter((x) => x.id !== a.id)))) { try { await ghDelete("dist/" + a.slug + "/index.html", "Remove page /" + a.slug); } catch {} toast("Deleted. Going live now."); } }}>Delete</button></div></div>))}</div>
     {T}
   </div></Shell>);
 }
 
 export default function App() {
-  const read = () => location.hash.replace(/^#/, "").split("?")[0] || "/";
+  if (/^#\//.test(location.hash)) history.replaceState({}, "", location.hash.slice(1).split("?")[0].replace(/\/?$/, "/")); /* old #/about links */
+  const read = () => location.pathname.replace(/\/index\.html$/, "").replace(/\/+$/, "") || "/";
   const [path, setPath] = useState(read);
-  const [articles, setArticles] = useState(LIVE ? null : load);
-  useEffect(() => {
-    if (!LIVE) return;
-    fetch("./articles.json", { cache: "no-store" }).then((r) => (r.ok ? r.json() : seed)).then((a) => setArticles(Array.isArray(a) ? a : seed)).catch(() => setArticles(seed));
-  }, []);
-  useEffect(() => { const f = () => { setPath(read()); scrollTo(0, 0); }; addEventListener("hashchange", f); addEventListener("popstate", f); return () => { removeEventListener("hashchange", f); removeEventListener("popstate", f); }; }, []);
+  const [articles, setArticles] = useState(load), [synced, setSynced] = useState(false);
+  useEffect(() => { fetchRemote().then((a) => { setArticles(a); try { localStorage.setItem(KEY, JSON.stringify(a)); } catch {} }).catch(() => {}).finally(() => setSynced(true)); }, []);
+  useEffect(() => { const f = () => { setPath(read()); scrollTo(0, 0); }; addEventListener("popstate", f); return () => removeEventListener("popstate", f); }, []);
   /* scroll reveal: anything with class "rv" fades up when it enters the screen */
   useEffect(() => {
     if (!("IntersectionObserver" in window)) { document.querySelectorAll(".rv").forEach((e) => e.classList.add("in")); return; }
@@ -526,5 +533,6 @@ export default function App() {
   if (path === "/about") return <About />;
   if (path === "/contact") return <Contact />;
   const a = articles.find((x) => "/" + x.slug === path);
+  if (!a && !synced && path !== "/") return <div className="boot"><i /><i /><i /></div>;
   return a ? <Article key={a.id} a={a} all={articles} /> : <Home articles={articles} />;
 }
